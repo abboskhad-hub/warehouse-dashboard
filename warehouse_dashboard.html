@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Склад — онлайн остатки</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,Arial,sans-serif;background:#0b1020;color:#eef2ff}
+  .wrap{max-width:1400px;margin:auto;padding:28px}
+  header{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:24px}
+  h1{margin:0;font-size:30px}.sub{color:#98a2b3;margin-top:6px}
+  .time{color:#98a2b3;font-size:14px}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px}
+  .card{background:#121a2d;border:1px solid #202b44;border-radius:18px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.18)}
+  .label{color:#98a2b3;font-size:13px;text-transform:uppercase;letter-spacing:.06em}
+  .num{font-size:34px;font-weight:700;margin-top:8px}
+  .grid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}
+  .panel{background:#121a2d;border:1px solid #202b44;border-radius:18px;padding:20px;margin-bottom:18px}
+  .panel h2{font-size:18px;margin:0 0 18px}
+  .chartbox{height:390px}
+  .filters{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+  input,select{background:#0d1526;color:#eef2ff;border:1px solid #2a3857;border-radius:10px;padding:11px 13px;outline:none}
+  input{min-width:260px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{padding:12px 10px;border-bottom:1px solid #202b44;text-align:left}
+  th{color:#98a2b3;font-weight:500}
+  .status{font-weight:700}
+  .ok{color:#5ee39a}.warn{color:#f5c451}.bad{color:#ff6b6b}
+  .critical-list{display:flex;flex-direction:column;gap:10px}
+  .critical{display:flex;justify-content:space-between;gap:15px;padding:13px;border-radius:12px;background:#0d1526}
+  .muted{color:#98a2b3}
+  @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}}
+  @media(max-width:600px){.wrap{padding:16px}.cards{grid-template-columns:1fr 1fr}.num{font-size:26px}input{min-width:100%}header{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>СКЛАД — ONLINE</h1>
+      <div class="sub">Остатки материалов и оборудования</div>
+    </div>
+    <div class="time" id="updated">Обновлено: —</div>
+  </header>
+
+  <section class="cards">
+    <div class="card"><div class="label">Позиций</div><div class="num" id="count">0</div></div>
+    <div class="card"><div class="label">Общий остаток</div><div class="num" id="total">0</div></div>
+    <div class="card"><div class="label">Заказ срочно</div><div class="num bad" id="urgent">0</div></div>
+    <div class="card"><div class="label">Подразделений</div><div class="num" id="departments">0</div></div>
+  </section>
+
+  <div class="grid">
+    <div>
+      <div class="panel">
+        <h2>Остатки по товарам</h2>
+        <div class="filters">
+          <input id="search" placeholder="Поиск товара...">
+          <select id="dept"><option value="">Все подразделения</option></select>
+          <select id="status"><option value="">Все статусы</option><option>Норма</option><option>ЗАКАЗ СРОЧНО</option></select>
+        </div>
+        <table>
+          <thead><tr><th>Товар</th><th>Ед.</th><th>Остаток</th><th>Расход 30 дн.</th><th>Мин.</th><th>Статус</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <h2>Остатки — визуально</h2>
+        <div class="chartbox"><canvas id="stockChart"></canvas></div>
+      </div>
+      <div class="panel">
+        <h2>Требуют заказа</h2>
+        <div class="critical-list" id="critical"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSpAsSobUHNwoLt2bES-kpXlaX4nOeg4-t2dwmFY5rs5lo0wZsPGjxsv4HCKFYeN2SSfnV_0LHo0sB7/pub?output=csv";
+let DATA = [];
+let filtered = [];
+let chart;
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [], cell = "", quoted = false;
+  for (let i=0; i<text.length; i++) {
+    const c=text[i], n=text[i+1];
+    if (c === '"' && quoted && n === '"') { cell += '"'; i++; continue; }
+    if (c === '"') { quoted = !quoted; continue; }
+    if (c === ',' && !quoted) { row.push(cell.trim()); cell=""; continue; }
+    if ((c === '\n' || c === '\r') && !quoted) {
+      if (c === '\r' && n === '\n') i++;
+      row.push(cell.trim()); cell="";
+      if (row.some(v=>v!=="")) rows.push(row);
+      row=[]; continue;
+    }
+    cell += c;
+  }
+  if (cell || row.length) { row.push(cell.trim()); if (row.some(v=>v!=="")) rows.push(row); }
+  return rows;
+}
+
+function num(v) {
+  if (v === undefined || v === null) return 0;
+  return Number(String(v).replace(/\s/g,"").replace(",", ".")) || 0;
+}
+
+async function loadData() {
+  const url = SHEET_URL + "&t=" + Date.now();
+  const response = await fetch(url, {cache:"no-store"});
+  if (!response.ok) throw new Error("Google Sheets: " + response.status);
+  const text = await response.text();
+  const rows = parseCSV(text);
+  if (!rows.length) throw new Error("Пустая таблица");
+
+  // Your columns:
+  // A Товар | B Ед.Изм. | C Остаток | D Подразделение |
+  // E Расход (30 дн) | F Минимальный остаток | G Статус
+  const dataRows = rows.slice(1).filter(r => r[0]);
+  DATA = dataRows.map(r => [
+    r[0],
+    r[1] || "",
+    num(r[2]),
+    r[3] || "",
+    num(r[4]),
+    num(r[5]),
+    r[6] || ""
+  ]);
+  render();
+}
+
+async function refreshData() {
+  try {
+    await loadData();
+  } catch (e) {
+    console.error(e);
+    document.getElementById('updated').textContent = "Ошибка обновления данных";
+  }
+}
+
+
+function render() {
+  const q=document.getElementById('search').value.toLowerCase();
+  const d=document.getElementById('dept').value;
+  const s=document.getElementById('status').value;
+  filtered=DATA.filter(x=>(!q||x[0].toLowerCase().includes(q))&&(!d||x[3]===d)&&(!s||x[6]===s));
+  document.getElementById('count').textContent=DATA.length;
+  document.getElementById('total').textContent=DATA.reduce((a,x)=>a+Number(x[2]),0).toLocaleString('ru-RU');
+  document.getElementById('urgent').textContent=DATA.filter(x=>x[6]==="ЗАКАЗ СРОЧНО").length;
+  document.getElementById('departments').textContent=new Set(DATA.map(x=>x[3])).size;
+  document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+
+  document.getElementById('rows').innerHTML=filtered.map(x=>{
+    const cls=x[6]==="ЗАКАЗ СРОЧНО"?'bad':'ok';
+    return `<tr><td>${x[0]}</td><td>${x[1]}</td><td><b>${x[2].toLocaleString('ru-RU')}</b></td><td>${x[4].toLocaleString('ru-RU')}</td><td>${x[5].toLocaleString('ru-RU')}</td><td class="status ${cls}">${x[6]}</td></tr>`;
+  }).join('');
+
+  const urgent=DATA.filter(x=>x[6]==="ЗАКАЗ СРОЧНО");
+  document.getElementById('critical').innerHTML=urgent.map(x=>`<div class="critical"><span>${x[0]}<br><span class="muted">${x[3]}</span></span><b class="bad">${x[2]} ${x[1]}</b></div>`).join('') || '<span class="muted">Критических позиций нет</span>';
+
+  const top=filtered.slice().sort((a,b)=>b[2]-a[2]).slice(0,8);
+  if(chart) chart.destroy();
+  chart=new Chart(document.getElementById('stockChart'),{
+    type:'bar',
+    data:{labels:top.map(x=>x[0]),datasets:[{label:'Остаток',data:top.map(x=>x[2]),borderRadius:8}]},
+    options:{responsive:true,maintainAspectRatio:false,animation:{duration:1400,easing:'easeOutQuart'},plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#98a2b3'}},y:{beginAtZero:true,ticks:{color:'#98a2b3'}}}}
+  });
+}
+['search','dept','status'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+
+function updateDepartments() {
+  const select = document.getElementById('dept');
+  const current = select.value;
+  select.innerHTML = '<option value="">Все подразделения</option>';
+  [...new Set(DATA.map(x=>x[3]).filter(Boolean))].forEach(x =>
+    select.insertAdjacentHTML('beforeend', `<option>${x}</option>`)
+  );
+  select.value = current;
+}
+
+// Wrap render so filters are refreshed when the sheet changes.
+const originalRender = render;
+render = function() {
+  updateDepartments();
+  originalRender();
+};
+
+refreshData();
+setInterval(refreshData, 60000);
+</script>
+</body>
+</html>
